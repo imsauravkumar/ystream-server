@@ -1,8 +1,15 @@
 const DEFAULT_CLIENT_URLS = ["http://localhost:5173", "http://localhost:4173"];
 
+function normalizeOrigin(origin) {
+  const value = String(origin || "").trim().replace(/\/+$/, "");
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  return `https://${value}`;
+}
+
 export function getClientOrigins() {
   return (process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : DEFAULT_CLIENT_URLS)
-    .map((origin) => origin.trim().replace(/\/+$/, ""))
+    .map(normalizeOrigin)
     .filter(Boolean);
 }
 
@@ -13,7 +20,7 @@ export function corsOrigin(origin, callback) {
   }
 
   const allowedOrigins = getClientOrigins();
-  if (allowedOrigins.includes(origin.replace(/\/+$/, ""))) {
+  if (allowedOrigins.includes(normalizeOrigin(origin))) {
     callback(null, true);
     return;
   }
