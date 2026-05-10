@@ -2,6 +2,7 @@ import { Server } from "socket.io";
 import Room from "../models/Room.js";
 import { verifySocketToken } from "../middleware/auth.js";
 import { normalizeRoomCode } from "../utils/roomCode.js";
+import { getClientOrigins } from "../config/cors.js";
 
 const activeRooms = new Map();
 
@@ -15,6 +16,10 @@ function publicUser(user) {
 
 function getActiveUsers(roomCode) {
   return Array.from(activeRooms.get(roomCode)?.values() || []);
+}
+
+function hasActiveUser(roomCode, uid) {
+  return getActiveUsers(roomCode).some((user) => user.uid === uid);
 }
 
 function setActiveUser(roomCode, socketId, user) {
@@ -61,6 +66,23 @@ function emitRoomState(io, roomCode, room) {
   });
 }
 
+async function transferHostIfNeeded(io, roomCode, leavingUid) {
+  const room = await Room.findOne({ code: roomCode });
+  if (!room || room.hostUid !== leavingUid || hasActiveUser(roomCode, leavingUid)) return;
+
+  const nextHost = getActiveUsers(roomCode)[0];
+  if (!nextHost) return;
+
+  const controllers = new Set(room.playbackControllerUids || []);
+  controllers.delete(leavingUid);
+  controllers.add(nextHost.uid);
+
+  room.hostUid = nextHost.uid;
+  room.playbackControllerUids = Array.from(controllers);
+  await room.save();
+  emitRoomState(io, roomCode, room);
+}
+
 function canControlPlayback(socket, room) {
   return room.hostUid === socket.user.uid || room.playbackControllerUids?.includes(socket.user.uid);
 }
@@ -88,7 +110,7 @@ function nextPlayback({ isPlaying, timestamp }) {
 export function createSocketServer(httpServer) {
   const io = new Server(httpServer, {
     cors: {
-      origin: process.env.CLIENT_URL?.split(",") || "http://localhost:5173",
+      origin: getClientOrigins(),
       credentials: true
     }
   });
@@ -118,7 +140,7 @@ export function createSocketServer(httpServer) {
         callback?.({ ok: true, room });
       } catch (error) {
         callback?.({ ok: false, message: error.message });
-        socket.emit("error-message", error.message);
+        if (!callback) socket.emit("error-message", error.message);
       }
     });
 
@@ -170,6 +192,9 @@ export function createSocketServer(httpServer) {
         const room = await Room.findOne({ code });
         if (!room || !video?.videoId) return;
         assertPlaybackControl(socket, room);
+        if (room.currentVideo) {
+          room.history = [...(room.history || []), room.currentVideo].slice(-25);
+        }
         room.currentVideo = { ...video, addedBy: publicUser(socket.user) };
         room.playback = nextPlayback({ isPlaying: true, timestamp: 0 });
         await room.save();
@@ -179,16 +204,19 @@ export function createSocketServer(httpServer) {
       }
     });
 
-    socket.on("queue-update", async ({ roomCode, action, video, index }) => {
+    socket.on("queue-update", async ({ roomCode, action, video, index }, callback) => {
       try {
         const code = normalizeRoomCode(roomCode);
         const room = await Room.findOne({ code });
-        if (!room) return;
+        if (!room) {
+          callback?.({ ok: false, message: "Room not found." });
+          return;
+        }
 
         if (action === "add" && video?.videoId) {
+          assertPlaybackControl(socket, room);
           const queuedVideo = { ...video, addedBy: publicUser(socket.user) };
           if (!room.currentVideo) {
-            assertPlaybackControl(socket, room);
             room.currentVideo = queuedVideo;
             room.playback = nextPlayback({ isPlaying: true, timestamp: 0 });
           } else {
@@ -198,21 +226,52 @@ export function createSocketServer(httpServer) {
 
         if (action === "remove") {
           assertPlaybackControl(socket, room);
-          room.queue.splice(Number(index), 1);
+          const removeIndex = Number(index);
+          if (!Number.isInteger(removeIndex) || removeIndex < 0 || removeIndex >= room.queue.length) {
+            throw new Error("That queue item is no longer available.");
+          }
+          room.queue.splice(removeIndex, 1);
         }
 
         if (action === "next") {
           assertPlaybackControl(socket, room);
           const nextVideo = room.queue.shift();
+          if (nextVideo && room.currentVideo) {
+            room.history = [...(room.history || []), room.currentVideo].slice(-25);
+          }
           room.currentVideo = nextVideo || null;
           room.playback = nextPlayback({ isPlaying: Boolean(nextVideo), timestamp: 0 });
+        }
+
+        if (action === "previous") {
+          assertPlaybackControl(socket, room);
+          const previousVideo = room.history?.pop();
+          if (!previousVideo) {
+            throw new Error("No previously played song yet.");
+          }
+          if (room.currentVideo) {
+            room.queue.unshift(room.currentVideo);
+          }
+          room.currentVideo = previousVideo;
+          room.playback = nextPlayback({ isPlaying: true, timestamp: 0 });
+        }
+
+        if (!["add", "remove", "next", "previous"].includes(action)) {
+          throw new Error("Invalid queue action.");
         }
 
         await room.save();
         io.to(code).emit("queue-update", room.queue);
         io.to(code).emit("sync-state", { playback: room.playback, currentVideo: room.currentVideo });
+        callback?.({
+          ok: true,
+          queue: room.queue,
+          playback: room.playback,
+          currentVideo: room.currentVideo
+        });
       } catch (error) {
-        socket.emit("error-message", error.message);
+        callback?.({ ok: false, message: error.message });
+        if (!callback) socket.emit("error-message", error.message);
       }
     });
 
@@ -283,8 +342,13 @@ export function createSocketServer(httpServer) {
     socket.on("disconnect", async () => {
       const code = socket.data.roomCode;
       if (!code) return;
+      socket.data.typing = false;
       removeActiveUser(code, socket.id);
-      io.to(code).emit("users-update", getActiveUsers(code));
+      const typingNames = Array.from(io.sockets.adapter.rooms.get(code) || [])
+        .map((socketId) => io.sockets.sockets.get(socketId))
+        .filter((client) => client?.data.typing)
+        .map((client) => publicUser(client.user).name);
+      socket.to(code).emit("typing", typingNames);
       await Room.updateOne(
         { code, "participants.uid": socket.user.uid },
         {
@@ -294,6 +358,8 @@ export function createSocketServer(httpServer) {
           }
         }
       );
+      await transferHostIfNeeded(io, code, socket.user.uid);
+      io.to(code).emit("users-update", getActiveUsers(code));
     });
   });
 

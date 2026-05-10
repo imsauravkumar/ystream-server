@@ -6,13 +6,14 @@ import authRoutes from "./routes/authRoutes.js";
 import roomRoutes from "./routes/roomRoutes.js";
 import youtubeRoutes from "./routes/youtubeRoutes.js";
 import { isDatabaseReady } from "./config/database.js";
+import { corsOrigin } from "./config/cors.js";
 import { notFound, errorHandler } from "./middleware/error.js";
 
 const app = express();
 
 app.use(
   cors({
-    origin: process.env.CLIENT_URL?.split(",") || "http://localhost:5173",
+    origin: corsOrigin,
     credentials: true
   })
 );

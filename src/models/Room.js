@@ -42,6 +42,7 @@ const roomSchema = new mongoose.Schema(
     hostUid: { type: String, required: true },
     playbackControllerUids: { type: [String], default: [] },
     currentVideo: { type: videoSchema, default: null },
+    history: { type: [videoSchema], default: [] },
     queue: { type: [videoSchema], default: [] },
     playback: { type: playbackSchema, default: () => ({}) },
     participants: { type: [participantSchema], default: [] },
