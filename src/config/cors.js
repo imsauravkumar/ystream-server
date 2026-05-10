@@ -1,4 +1,9 @@
-const DEFAULT_CLIENT_URLS = ["http://localhost:5173", "http://localhost:4173"];
+const DEFAULT_CLIENT_URLS = [
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "https://ystream-client.vercel.app",
+  "https://video-call-client-kappa.vercel.app"
+];
 
 function normalizeOrigin(origin) {
   const value = String(origin || "").trim().replace(/\/+$/, "");
