@@ -2,7 +2,9 @@ const DEFAULT_CLIENT_URLS = [
   "http://localhost:5173",
   "http://localhost:4173",
   "https://ystream-client.vercel.app",
-  "https://video-call-client-kappa.vercel.app"
+  "https://video-call-client-kappa.vercel.app",
+  "https://mesaurav.in",
+  "https://www.mesaurav.in"
 ];
 
 function normalizeOrigin(origin) {
@@ -13,9 +15,8 @@ function normalizeOrigin(origin) {
 }
 
 export function getClientOrigins() {
-  return (process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : DEFAULT_CLIENT_URLS)
-    .map(normalizeOrigin)
-    .filter(Boolean);
+  const configuredOrigins = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : [];
+  return [...new Set([...DEFAULT_CLIENT_URLS, ...configuredOrigins].map(normalizeOrigin).filter(Boolean))];
 }
 
 export function corsOrigin(origin, callback) {
